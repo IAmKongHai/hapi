@@ -49,6 +49,15 @@ bun install
 bun run build:single-exe
 ```
 
+For local development from a source checkout:
+
+```bash
+bun run install:source
+```
+
+This installs a `hapi` wrapper into `~/.local/bin` that runs this checkout
+while preserving the directory where you invoke `hapi`.
+
 ## Credits
 
 HAPI means "哈皮" a Chinese transliteration of [Happy](https://github.com/slopus/happy). Great credit to the original project.
