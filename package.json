@@ -23,6 +23,7 @@
         "test:hub": "cd hub && bun run test",
         "test:web": "cd web && bun run test",
         "clean-session": "bun run hub/scripts/cleanup-sessions.ts",
+        "install:source": "bash scripts/install-source.sh",
         "release-all": "cd cli && bun run release-all"
     },
     "devDependencies": {
