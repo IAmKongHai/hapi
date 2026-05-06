@@ -18,7 +18,6 @@ import type { SkillSearchResult } from '@/lib/skill-search'
 import type { ConversationStatus } from '@/realtime/types'
 import { useActiveWord } from '@/hooks/useActiveWord'
 import { useActiveSuggestions } from '@/hooks/useActiveSuggestions'
-import { findActiveWord } from '@/utils/findActiveWord'
 import { applySuggestion } from '@/utils/applySuggestion'
 import { usePlatform } from '@/hooks/usePlatform'
 import { usePWAInstall } from '@/hooks/usePWAInstall'
@@ -30,6 +29,7 @@ import { Autocomplete } from '@/components/ChatInput/Autocomplete'
 import { SkillPickerDialog } from '@/components/AssistantChat/SkillPickerDialog'
 import { StatusBar } from '@/components/AssistantChat/StatusBar'
 import { ComposerButtons } from '@/components/AssistantChat/ComposerButtons'
+import { CONTINUE_PROMPT, ContinuePromptDialog } from '@/components/AssistantChat/ContinuePromptDialog'
 import { AttachmentItem } from '@/components/AssistantChat/AttachmentItem'
 import { useTranslation } from '@/lib/use-translation'
 import { getModelOptionsForFlavor, getNextModelForFlavor } from './modelOptions'
@@ -45,7 +45,6 @@ type SkillPickerAnchor = {
     text: string
     selection: { start: number; end: number }
     query: string
-    signature: string
 }
 
 const defaultSuggestionHandler = async (): Promise<Suggestion[]> => []
@@ -81,6 +80,7 @@ export function HappyComposer(props: {
     autocompleteSuggestions?: (query: string) => Promise<Suggestion[]>
     availableSkills?: readonly SkillSummary[]
     refreshSkills?: () => Promise<SkillSummary[]>
+    onQuickSendPrompt?: (text: string) => void
     // Voice assistant props
     voiceStatus?: ConversationStatus
     voiceMicMuted?: boolean
@@ -119,6 +119,7 @@ export function HappyComposer(props: {
         autocompleteSuggestions = defaultSuggestionHandler,
         availableSkills = [],
         refreshSkills,
+        onQuickSendPrompt,
         voiceStatus = 'disconnected',
         voiceMicMuted = false,
         onVoiceToggle,
@@ -163,7 +164,7 @@ export function HappyComposer(props: {
     const [isSwitching, setIsSwitching] = useState(false)
     const [showContinueHint, setShowContinueHint] = useState(false)
     const [skillPickerAnchor, setSkillPickerAnchor] = useState<SkillPickerAnchor | null>(null)
-    const [dismissedSkillSignature, setDismissedSkillSignature] = useState<string | null>(null)
+    const [continuePromptDialogOpen, setContinuePromptDialogOpen] = useState(false)
 
     const textareaRef = useRef<HTMLTextAreaElement>(null)
     const prevControlledByUser = useRef(controlledByUser)
@@ -200,46 +201,11 @@ export function HappyComposer(props: {
         [autocompletePrefixes]
     )
     const activeWord = useActiveWord(inputState.text, inputState.selection, compactAutocompletePrefixes)
-    const activeSkillWord = useMemo(
-        () => agentFlavor === 'codex'
-            ? findActiveWord(inputState.text, inputState.selection, ['$'])
-            : undefined,
-        [agentFlavor, inputState.text, inputState.selection]
-    )
-    const activeSkillSignature = activeSkillWord
-        ? `${activeSkillWord.offset}:${activeSkillWord.activeWord}:${activeSkillWord.endOffset}`
-        : null
     const [suggestions, selectedIndex, moveUp, moveDown, clearSuggestions] = useActiveSuggestions(
         activeWord,
         autocompleteSuggestions,
         { clampSelection: true, wrapAround: true }
     )
-
-    useEffect(() => {
-        if (!activeSkillWord) {
-            setDismissedSkillSignature(null)
-            return
-        }
-
-        if (!activeSkillSignature || dismissedSkillSignature === activeSkillSignature) {
-            return
-        }
-
-        clearSuggestions()
-        setSkillPickerAnchor((current) => current?.signature === activeSkillSignature ? current : {
-            text: inputState.text,
-            selection: inputState.selection,
-            query: activeSkillWord.activeWord.slice(1),
-            signature: activeSkillSignature,
-        })
-    }, [
-        activeSkillSignature,
-        activeSkillWord?.activeWord,
-        clearSuggestions,
-        dismissedSkillSignature,
-        inputState.selection,
-        inputState.text,
-    ])
 
     const haptic = useCallback((type: 'light' | 'success' | 'error' = 'light') => {
         if (type === 'light') {
@@ -254,9 +220,6 @@ export function HappyComposer(props: {
     const handleSuggestionSelect = useCallback((index: number) => {
         const suggestion = suggestions[index]
         if (!suggestion || !textareaRef.current) return
-        if (suggestion.text.startsWith('$')) {
-            markSkillUsed(suggestion.text.slice(1))
-        }
 
         const result = applySuggestion(
             inputState.text,
@@ -302,16 +265,13 @@ export function HappyComposer(props: {
     }, [])
 
     const handleSkillPickerClose = useCallback(() => {
-        setDismissedSkillSignature(skillPickerAnchor?.signature ?? null)
         setSkillPickerAnchor(null)
         restoreTextareaFocus()
-    }, [restoreTextareaFocus, skillPickerAnchor?.signature])
+    }, [restoreTextareaFocus])
 
     const handleSkillSelect = useCallback((suggestion: SkillSearchResult) => {
         if (!skillPickerAnchor) return
-        if (suggestion.text.startsWith('$')) {
-            markSkillUsed(suggestion.text.slice(1))
-        }
+        markSkillUsed(suggestion)
 
         const result = applySuggestion(
             skillPickerAnchor.text,
@@ -326,11 +286,37 @@ export function HappyComposer(props: {
             text: result.text,
             selection: { start: result.cursorPosition, end: result.cursorPosition }
         })
-        setDismissedSkillSignature(null)
         setSkillPickerAnchor(null)
         restoreTextareaFocus(result.cursorPosition)
         haptic('light')
     }, [api, haptic, restoreTextareaFocus, skillPickerAnchor])
+
+    const handleSkillPickerShortcut = useCallback(() => {
+        if (controlsDisabled || agentFlavor !== 'codex') return
+        clearSuggestions()
+        const el = textareaRef.current
+        const selection = el
+            ? { start: el.selectionStart, end: el.selectionEnd }
+            : inputState.selection
+        setSkillPickerAnchor({
+            text: inputState.text,
+            selection,
+            query: '',
+        })
+        haptic('light')
+    }, [agentFlavor, clearSuggestions, controlsDisabled, haptic, inputState.selection, inputState.text])
+
+    const handleContinuePromptShortcut = useCallback(() => {
+        if (controlsDisabled || !onQuickSendPrompt) return
+        setContinuePromptDialogOpen(true)
+        haptic('light')
+    }, [controlsDisabled, haptic, onQuickSendPrompt])
+
+    const handleContinuePromptConfirm = useCallback(() => {
+        if (controlsDisabled || !onQuickSendPrompt) return
+        onQuickSendPrompt(CONTINUE_PROMPT)
+        haptic('success')
+    }, [controlsDisabled, haptic, onQuickSendPrompt])
 
     const abortDisabled = controlsDisabled || isAborting || !threadIsRunning
     const switchDisabled = controlsDisabled || isSwitching || !controlledByUser
@@ -915,10 +901,21 @@ export function HappyComposer(props: {
                             voiceMicMuted={voiceMicMuted}
                             onVoiceToggle={onVoiceToggle ?? (() => {})}
                             onVoiceMicToggle={onVoiceMicToggle}
+                            showSkillPickerButton={agentFlavor === 'codex'}
+                            skillPickerDisabled={controlsDisabled}
+                            onSkillPickerOpen={handleSkillPickerShortcut}
+                            showContinuePromptButton={Boolean(onQuickSendPrompt)}
+                            continuePromptDisabled={controlsDisabled}
+                            onContinuePromptOpen={handleContinuePromptShortcut}
                             onSend={handleSend}
                         />
                     </div>
                 </ComposerPrimitive.Root>
+                <ContinuePromptDialog
+                    open={continuePromptDialogOpen}
+                    onOpenChange={setContinuePromptDialogOpen}
+                    onConfirm={handleContinuePromptConfirm}
+                />
                 <SkillPickerDialog
                     open={skillPickerAnchor !== null}
                     initialQuery={skillPickerAnchor?.query ?? ''}
